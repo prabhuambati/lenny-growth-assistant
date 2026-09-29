@@ -1,0 +1,69 @@
+# docker-compose.yml — place at the repo root, alongside /backend and /deploy.
+#
+# One-command startup:
+#   1. cp backend/.env.example backend/.env   (edit if you want cloud providers)
+#   2. Make sure Ollama is running on the HOST machine: `ollama serve` (see README)
+#   3. docker compose up --build
+#
+# Ollama itself is NOT containerized here on purpose — GPU/Metal passthrough
+# for Ollama inside Docker is unreliable across macOS/Windows/Linux within
+# this project's scope, so the backend reaches it via host.docker.internal.
+# See architecture.md §8 for the full rationale.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16   # postgres:16 + pgvector extension preinstalled
+    container_name: lenny_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: lenny_assistant
+    ports:
+      - "5432:5432"
+    volumes:
+      - lenny_pgdata:/var/lib/postgresql/data
+      - ./deploy/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    container_name: lenny_api
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      # override just the pieces that must point at Docker service names,
+      # not localhost, when running inside the compose network
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/lenny_assistant
+      OLLAMA_HOST: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # makes host.docker.internal resolve on Linux too
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error --connect-timeout 1 --max-time 3 http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: lenny_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  lenny_pgdata:
